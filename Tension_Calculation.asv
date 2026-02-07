@@ -15,12 +15,16 @@ clear; clc;
 xlsxFile    = "parameter.xlsx";
 inputSheet  = "input";
 outputSheet = "Results";
+materialSheet = "mats";
 
-%% read + map rows into a struct
+%% read + map rows into a struct + Material
 raw = readcell(xlsxFile,"Sheet",inputSheet);
 hdr = find(strcmpi(string(raw(:,1)),"Variable Name"),1,"first");
 data = raw(hdr+1:end, 1:3); % [Variable Name, Value, Unit]
 
+mats_raw = readcell(xlsxFile,"Sheet",materialSheet);
+mats_headers = mats_raw(1, :);
+mats_data    = mats_raw(2:end, :);
 vars = struct();
 for i = 1:size(data,1)
     name = data{i,1};
@@ -37,19 +41,62 @@ for i = 1:size(data,1)
     vars.(key) = struct("value",data{i,2},"unit",string(data{i,3}));
 end
 
+
+materials = struct([]);
+
+for i = 1:size(mats_data,1)
+    materials(i).material         = mats_data{i,1};
+    materials(i).density          = double(mats_data{i,2});
+    materials(i).tensileStrength  = double(mats_data{i,3});
+    materials(i).youngsModulus    = double(mats_data{i,4});
+end %adds material
+
 %% pull inputs
 f = double(vars.frequency.value);              % Hz
 D = double(vars.diameter.value);               % in units below
 Dunit = lower(strtrim(vars.diameter.unit));    % "ft" or "m"
 if Dunit == "ft", D = D*0.3048; end            % -> meters
 a = D/2;                                       % radius (m)
+%material_type = 
+alpha = double(vars.amn.value);   %Constant   
 
-alpha = double(vars.amn.value);                %Constant   
-rho = double(vars.membrane_density.value);     %rho
-% mu (kg/m^2)
+n = vars.FoS.va
 h_mm = double(vars.membrane_thickness.value);  % mm
 h = h_mm*1e-3;                                 % m
 mu = rho*h;                                    % kg/m^2
+%Materials
+ID = double(vars.membrane_type.value);
+rho = materials(ID).density;     %rho
+sigma_u_MPa = material(ID).tensileStrength;    %Tensile Strength
+
+
+%% 3D sweep: T vs pitch (Hz) and diameter (m)
+% Uses: alpha, mu already computed in script
+T0 = 1.0e5;   % target tension (N/m)
+pitch = linspace(20,150,60);      % Hz 
+Dvec  = linspace(4,6.5,60);     % m  
+
+[P, D] = meshgrid(pitch, Dvec);
+a = D/2;
+
+Tsurf = mu .* ((2*pi.*a.*P)./alpha).^2;   % N/m
+
+figure;
+surf(P, D, Tsurf); hold on;
+
+surf(P, D, T0*ones(size(P)), ...
+    'FaceAlpha',0.55, ...
+    'EdgeColor','none', 'faceColor', 'red'); hold on;
+
+contour3(P, D, Tsurf, [T0 T0], ...
+    'k', 'LineWidth', 3);
+
+xlabel("Pitch (Hz)");
+ylabel("Diameter (m)");
+zlabel("Tension T (N/m)");
+title("Drumhead Tension vs Pitch and Diameter of" + string(materials(ID).material));
+grid on;
+
 
 %% calculate
 T    = mu * ((2*pi*a*f)/alpha)^2/1000;  % kN/m
@@ -61,4 +108,4 @@ out = {
     "RimForce",  Frim, "kN";
 };
 disp(out)
-writecell(out, xlsxFile, "Sheet", outputSheet, "Range", "A1");
+%writecell(out, xlsxFile, "Sheet", outputSheet, "Range", "A1");

@@ -1,100 +1,109 @@
-%% Tension_Calculation.m (SCRIPT)
-% Reads an Excel file formatted like your screenshot:
-% Columns: Variable Name | Value | Unit | Comments
-% Computes membrane tension (N/m) from frequency and writes results to a new sheet.
+
 
 clear; clc;
 
-%% ---- USER SETTINGS ----
-xlsxFile    = "parameter.xlsx";  % <--- change this
-inputSheet  = "input";                   % can be sheet index or "Sheet1"
-outputSheet = "Results";           % new sheet name
-%% -----------------------
+%% settings
+xlsxFile    = "parameter.xlsx";
+inputSheet  = "input";
+outputSheet = "Results";
+materialSheet = "mats";
 
-% Read raw cells so we can handle mixed text/numbers easily
-raw = readcell(xlsxFile, "Sheet", inputSheet);
+%% read + map rows into a struct + Material
+raw = readcell(xlsxFile,"Sheet",inputSheet);
+hdr = find(strcmpi(string(raw(:,1)),"Variable Name"),1,"first");
+data = raw(hdr+1:end, 1:3); % [Variable Name, Value, Unit]
 
-% Find header row containing "Variable Name"
-headerRow = findRowContaining(raw, "Variable Name");
-if isempty(headerRow)
-    error('Could not find a header row containing "Variable Name".');
-end
-
-% Get column indices based on header names
-headers = raw(headerRow, :);
-colVar  = findCol(headers, "Variable Name");
-colVal  = findCol(headers, "Value");
-colUnit = findCol(headers, "Unit");
-
-if any([colVar colVal colUnit] == 0)
-    error('Expected columns: Variable Name, Value, Unit (Comments optional).');
-end
-
-% Parse key-value pairs below header
+mats_raw = readcell(xlsxFile,"Sheet",materialSheet);
+mats_headers = mats_raw(1, :);
+mats_data    = mats_raw(2:end, :);
 vars = struct();
-for r = headerRow+1:size(raw,1)
-    vname = raw{r, colVar};
-    if ismissingCell(vname), continue; end
-
-    vname = string(vname);
-    if strlength(strtrim(vname))==0
-        continue;
+for i = 1:size(data,1)
+    name = data{i,1};
+    % skip empty or missing rows
+    if isempty(name) || (isstring(name) && ismissing(name))
+        continue
     end
 
-    val  = raw{r, colVal};
-    unit = "";
-    if colUnit > 0 && colUnit <= size(raw,2) && ~ismissingCell(raw{r,colUnit})
-        unit = string(raw{r, colUnit});
+    if ismissing(name)
+      key = "empty"; % or a default string
+    else
+      key = matlab.lang.makeValidName(lower(string(name)));
     end
-
-    key = matlab.lang.makeValidName(lower(strtrim(vname)));
-    vars.(key) = struct("value", val, "unit", unit);
+    vars.(key) = struct("value",data{i,2},"unit",string(data{i,3}));
 end
 
-%% ---- Pull required inputs ----
-f = getNumeric(vars, "frequency"); % Hz
-if isnan(f), error('Missing or non-numeric "frequency".'); end
 
-diameter_m = getLengthInMeters(vars, "diameter"); % supports ft/in/m/cm/mm
-if isnan(diameter_m), error('Missing or non-numeric "diameter".'); end
-a = diameter_m/2; % radius (m)
+materials = struct([]);
 
-% Alpha (Bessel root): use Amn if present, else fundamental 2.4048
-alpha = getNumeric(vars, "amn");
-if isnan(alpha), alpha = 2.4048; end
+for i = 1:size(mats_data,1)
+    materials(i).material         = mats_data{i,1};
+    materials(i).density          = double(mats_data{i,2});
+    materials(i).tensileStrength  = double(mats_data{i,3});
+    materials(i).youngsModulus    = double(mats_data{i,4});
+end %adds material
 
-% Areal mass density mu (kg/m^2) — needed to compute tension
-mu = computeArealDensity(vars);
-if isnan(mu) || mu <= 0
-    error(['Could not compute membrane areal density μ (kg/m^2). ' ...
-           'Provide membrane_thickness (mm) and membrane_density (PVC or rho), ' ...
-           'OR provide membrane_density directly as numeric kg/m^2 with unit kg/m^2.']);
-end
+%% pull inputs
+f = double(vars.frequency.value);              % Hz
+D = double(vars.diameter.value);               % in units below
+Dunit = lower(strtrim(vars.diameter.unit));    % "ft" or "m"
+if Dunit == "ft", D = D*0.3048; end            % -> meters
+a = D/2;                                       % radius (m)
+%material_type = 
+alpha = double(vars.amn.value);   %Constant   
 
-%% ---- Physics ----
-% f = (alpha/(2*pi*a)) * sqrt(T/mu)  =>  T = mu * (2*pi*a*f/alpha)^2
-T    = mu * ((2*pi*a*f)/alpha)^2; % N/m  (tension per unit length)
-c    = sqrt(T/mu);                % m/s  membrane wave speed
-Frim = 2*pi*a*T;                  % N    total rim load (inward hoop force)
+n = vars.fos.value;                             %Factor of Safety
+h_mm = double(vars.membrane_thickness.value);  % mm
+h = h_mm*1e-3;                                 % m
+                                   % kg/m^2
+%Materials
+ID = double(vars.membrane_type.value);
+rho = materials(ID).density;     %rho
+sigma_u_MPa = materials(ID).tensileStrength;    %Tensile Strength
 
-%% ---- Write results ----
+%calculations
+mu = rho*h; 
+sigma_u = sigma_u_MPa * 1e6;   % [Pa]
+T_max   = sigma_u * h;         % [N/m]
+T_allow = T_max / n;           % [N/m]
+fprintf('T_max   = %.3g N/m (%.3g kN/m)\n', T_max,   T_max/1e3);
+fprintf('T_allow = %.3g N/m (%.3g kN/m)  (SF=%g)\n', T_allow, T_allow/1e3, n);
+
+%% 3D sweep: T vs pitch (Hz) and diameter (m)
+% Uses: alpha, mu already computed in script
+
+pitch = linspace(10,110,30);      % Hz 
+Dvec  = linspace(5.5,6.5,30);     % m  
+
+[P, D] = meshgrid(pitch, Dvec);
+a = D/2;
+
+Tsurf = mu .* ((2*pi.*a.*P)./alpha).^2;   % N/m
+
+figure;
+surf(P, D, Tsurf); hold on;
+
+surf(P, D, T_allow*ones(size(P)), ...
+    'FaceAlpha',0.55, ...
+    'EdgeColor','none', 'faceColor', 'red'); hold on;
+
+contour3(P, D, Tsurf, [T_allow T_allow], ...
+    'k', 'LineWidth', 3);
+
+xlabel("Pitch (Hz)");
+ylabel("Diameter (m)");
+zlabel("Tension T (N/m)");
+title("Drumhead Tension vs Pitch and Diameter of " + string(materials(ID).material));
+grid on;
+
+
+%% calculate
+T    = mu * ((2*pi*a*f)/alpha)^2/1000;  % kN/m
+Frim = 2*pi*a*T;                   % kN
+
+%% write results
 out = {
-    "Variable","Value","Unit","Notes";
-    "frequency", f, "Hz", "";
-    "diameter", diameter_m, "m", "Converted to meters";
-    "radius", a, "m", "";
-    "alpha_mn", alpha, "-", "Bessel root used";
-    "mu_areal_density", mu, "kg/m^2", "Membrane areal mass density";
-    "wave_speed_c", c, "m/s", "c = sqrt(T/mu)";
-    "tension_T", T, "N/m", "Surface tension (per unit length)";
-    "rim_force_total", Frim, "N", "Frim = 2*pi*a*T";
+    "Tension_T", T, "kN/m";
+    "RimForce",  Frim, "kN";
 };
-
-meta = {
-    "GeneratedOn", string(datetime('now')), "", ""
-};
-
-writecell(meta, xlsxFile, "Sheet", outputSheet, "Range", "A1");
-writecell(out,  xlsxFile, "Sheet", outputSheet, "Range", "A3");
-
-fprintf('Wrote results to sheet "%s" in %s\n', outputSheet, xlsxFile);
+disp(out)
+%writecell(out, xlsxFile, "Sheet", outputSheet, "Range", "A1");
